@@ -13,9 +13,10 @@ import {
   MIN_SELECTION,
   parseTime,
 } from './services/audioProcessor'
+import { LocalFfmpegProcessor } from './services/ffmpegProcessor'
 import type { EditMode, OutputFormat, WaveformData } from './types'
 
-const outputOptions: Array<{ value: OutputFormat; label: string; detail: string }> = [
+const audioOutputOptions: Array<{ value: OutputFormat; label: string; detail: string }> = [
   { value: 'wav', label: 'WAV', detail: 'Uncompressed' },
   { value: 'mp3', label: 'MP3', detail: 'Browser codec' },
   { value: 'm4a', label: 'M4A / AAC', detail: 'Browser codec' },
@@ -23,7 +24,12 @@ const outputOptions: Array<{ value: OutputFormat; label: string; detail: string 
   { value: 'ogg', label: 'OGG / Opus', detail: 'Browser codec' },
 ]
 
-type IconName = 'upload' | 'play' | 'pause' | 'spark' | 'download' | 'plus' | 'minus' | 'undo' | 'shield' | 'chevron' | 'x' | 'wave' | 'check'
+const videoOutputOptions: Array<{ value: OutputFormat; label: string; detail: string }> = [
+  { value: 'mp4', label: 'MP4', detail: 'H.264 + AAC' },
+  { value: 'webm', label: 'WebM', detail: 'VP9 + Opus' },
+]
+
+type IconName = 'upload' | 'play' | 'pause' | 'spark' | 'download' | 'plus' | 'minus' | 'undo' | 'shield' | 'chevron' | 'x' | 'wave' | 'video' | 'check'
 
 function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
   const common = { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const, 'aria-hidden': true }
@@ -40,6 +46,7 @@ function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
     chevron: <path d="m8 10 4 4 4-4" />,
     x: <><path d="m6 6 12 12" /><path d="m18 6-12 12" /></>,
     wave: <><path d="M3 12h2l2-6 3 12 3-9 2 6 2-3h4" /></>,
+    video: <><rect x="3" y="5" width="13" height="14" rx="2" /><path d="m16 10 5-3v10l-5-3" /></>,
     check: <path d="m5 12 4 4L19 6" />,
   }
   return <svg {...common}>{paths[name]}</svg>
@@ -52,6 +59,26 @@ function clamp(value: number, min: number, max: number) {
 function makeFileLabel(file: File) {
   const size = file.size / 1024 / 1024
   return `${file.name} · ${size < 1 ? `${Math.round(file.size / 1024)} KB` : `${size.toFixed(1)} MB`}`
+}
+
+function isVideoFile(file: File) {
+  return file.type.startsWith('video/') || /\.(mp4|webm|mov|m4v|avi|mkv)$/i.test(file.name)
+}
+
+function loadVideoDuration(url: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const video = document.createElement('video')
+    video.preload = 'metadata'
+    video.onloadedmetadata = () => {
+      const value = video.duration
+      video.removeAttribute('src')
+      video.load()
+      if (Number.isFinite(value)) resolve(value)
+      else reject(new Error('The video duration could not be read.'))
+    }
+    video.onerror = () => reject(new Error('This browser could not read the video metadata.'))
+    video.src = url
+  })
 }
 
 function WaveformEditor({
@@ -262,6 +289,8 @@ function WaveformEditor({
 
 export default function App() {
   const [file, setFile] = useState<File | null>(null)
+  const [mediaKind, setMediaKind] = useState<'audio' | 'video'>('audio')
+  const [mediaUrl, setMediaUrl] = useState<string | null>(null)
   const [waveform, setWaveform] = useState<WaveformData | null>(null)
   const [audioBuffer, setAudioBuffer] = useState<AudioBuffer | null>(null)
   const [start, setStart] = useState(0)
@@ -281,18 +310,23 @@ export default function App() {
   const [error, setError] = useState('')
   const [exported, setExported] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
+  const videoRef = useRef<HTMLVideoElement>(null)
+  const mediaUrlRef = useRef<string | null>(null)
   const contextRef = useRef<AudioContext | null>(null)
+  const ffmpegRef = useRef<LocalFfmpegProcessor | null>(null)
   const sourceRef = useRef<AudioBufferSourceNode | null>(null)
   const frameRef = useRef<number | null>(null)
+  const exportAbortRef = useRef<AbortController | null>(null)
   const playbackElapsedRef = useRef(0)
   const playbackStartedAtRef = useRef(0)
   const playbackBufferDurationRef = useRef(0)
 
   const duration = waveform?.duration ?? 0
   const selectionDuration = Math.max(0, end - start)
+  const outputOptions = mediaKind === 'video' ? videoOutputOptions : audioOutputOptions
   const selectedFormat = outputOptions.find((option) => option.value === format) ?? outputOptions[0]
-  const codec = format === 'wav' ? 'audio/wav' : browserEncoderFor(format)
-  const isCodecAvailable = format === 'wav' || !!codec
+  const codec = mediaKind === 'video' ? null : format === 'wav' ? 'audio/wav' : browserEncoderFor(format)
+  const isCodecAvailable = mediaKind === 'video' || format === 'wav' || !!codec
 
   const stopPlayback = useCallback(() => {
     if (frameRef.current !== null) cancelAnimationFrame(frameRef.current)
@@ -302,12 +336,15 @@ export default function App() {
       try { sourceRef.current.stop() } catch { /* source already ended */ }
     }
     sourceRef.current = null
+    if (videoRef.current) videoRef.current.pause()
     setIsPlaying(false)
   }, [])
 
   useEffect(() => () => {
     stopPlayback()
     void contextRef.current?.close()
+    ffmpegRef.current?.cancel()
+    if (mediaUrlRef.current) URL.revokeObjectURL(mediaUrlRef.current)
   }, [stopPlayback])
 
   const setSelection = useCallback((nextStart: number, nextEnd: number) => {
@@ -323,33 +360,64 @@ export default function App() {
   }, [duration, stopPlayback])
 
   const loadFile = useCallback(async (nextFile: File) => {
-    if (!nextFile.type.startsWith('audio/') && !/\.(mp3|wav|m4a|aac|flac|ogg|opus|webm)$/i.test(nextFile.name)) {
-      setError('That file does not look like audio. Try an MP3, WAV, M4A, FLAC, OGG, or Opus file.')
+    const video = isVideoFile(nextFile)
+    const audio = nextFile.type.startsWith('audio/') || /\.(mp3|wav|m4a|aac|flac|ogg|opus)$/i.test(nextFile.name)
+    if (!audio && !video) {
+      setError('That file does not look like audio or video. Try MP3, WAV, MP4, WebM, M4A, FLAC, OGG, or Opus.')
       return
     }
 
     stopPlayback()
+    if (mediaUrlRef.current) URL.revokeObjectURL(mediaUrlRef.current)
+    mediaUrlRef.current = null
+    setMediaUrl(null)
     setError('')
     setExported(false)
     setIsBusy(true)
-    setStatus('Reading audio locally…')
+    setStatus(video ? 'Reading video locally…' : 'Reading audio locally…')
 
+    let nextUrl: string | null = null
     try {
-      const context = contextRef.current ?? getAudioContext()
-      contextRef.current = context
-      const decoded = await decodeAudioFile(nextFile, context)
+      let decoded: AudioBuffer | null = null
+      let nextDuration = 0
+
+      if (video) {
+        nextUrl = URL.createObjectURL(nextFile)
+        nextDuration = await loadVideoDuration(nextUrl)
+        try {
+          const context = contextRef.current ?? getAudioContext()
+          contextRef.current = context
+          decoded = await decodeAudioFile(nextFile, context)
+        } catch {
+          // Some browser/container combinations expose video playback but not AudioContext decoding.
+        }
+      } else {
+        const context = contextRef.current ?? getAudioContext()
+        contextRef.current = context
+        decoded = await decodeAudioFile(nextFile, context)
+        nextDuration = decoded.duration
+      }
+
+      const peaks = decoded ? buildWaveform(decoded) : new Float32Array(Math.max(1, Math.ceil(nextDuration * 60)))
+      mediaUrlRef.current = nextUrl
+      setMediaUrl(nextUrl)
+      setMediaKind(video ? 'video' : 'audio')
       setFile(nextFile)
       setAudioBuffer(decoded)
-      setWaveform({ peaks: buildWaveform(decoded), duration: decoded.duration })
+      setWaveform({ peaks, duration: nextDuration })
       setStart(0)
-      setEnd(decoded.duration)
+      setEnd(nextDuration)
       setStartInput(formatTime(0))
-      setEndInput(formatTime(decoded.duration))
+      setEndInput(formatTime(nextDuration))
       setPlayhead(0)
       setZoom(1)
-      setStatus('Audio is loaded and ready to trim.')
+      setFormat(video ? 'mp4' : 'wav')
+      setStatus(video
+        ? decoded ? 'Video is loaded and ready to trim.' : 'Video is ready. Waveform preview is unavailable for this container.'
+        : 'Audio is loaded and ready to trim.')
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : 'Could not decode that audio file in this browser.')
+      if (nextUrl) URL.revokeObjectURL(nextUrl)
+      setError(loadError instanceof Error ? loadError.message : 'Could not decode that media file in this browser.')
       setStatus('Could not load this file.')
     } finally {
       setIsBusy(false)
@@ -409,7 +477,64 @@ export default function App() {
     frameRef.current = requestAnimationFrame(animatePlayback)
   }
 
+  const handleVideoTimeUpdate = () => {
+    const video = videoRef.current
+    if (!video) return
+    const current = video.currentTime
+
+    if (mode === 'keep' && current >= end - 0.03) {
+      video.pause()
+      video.currentTime = start
+      setPlayhead(start)
+      setIsPlaying(false)
+      return
+    }
+
+    if (mode === 'remove' && current >= start && current < end - 0.03) {
+      video.currentTime = end
+      return
+    }
+
+    setPlayhead(clamp(current, 0, duration))
+  }
+
+  const handleVideoEnded = () => {
+    setIsPlaying(false)
+    setPlayhead(mode === 'keep' ? start : 0)
+  }
+
+  const handlePlayheadChange = (time: number) => {
+    setPlayhead(time)
+    if (videoRef.current) {
+      videoRef.current.pause()
+      videoRef.current.currentTime = time
+      setIsPlaying(false)
+    }
+  }
+
   const togglePlayback = async () => {
+    if (mediaKind === 'video') {
+      const video = videoRef.current
+      if (!video) return
+      if (isPlaying) {
+        video.pause()
+        setIsPlaying(false)
+        return
+      }
+
+      const nextPosition = mode === 'keep'
+        ? playhead >= end || playhead < start ? start : playhead
+        : playhead >= start && playhead < end ? end : playhead
+      video.currentTime = clamp(nextPosition, 0, duration)
+      try {
+        await video.play()
+        setIsPlaying(true)
+      } catch {
+        setError('Video playback was blocked by the browser. Press play again to allow local preview.')
+      }
+      return
+    }
+
     if (isPlaying) {
       const context = contextRef.current
       if (context) playbackElapsedRef.current = Math.min(playbackBufferDurationRef.current, playbackElapsedRef.current + context.currentTime - playbackStartedAtRef.current)
@@ -425,20 +550,31 @@ export default function App() {
   }
 
   const handleExport = async () => {
-    if (!audioBuffer || isBusy) return
+    if ((!audioBuffer && mediaKind === 'audio') || !file || isBusy) return
     setError('')
     setExported(false)
     setIsBusy(true)
     setStatus('Rendering your edit on this device…')
+    const exportController = new AbortController()
+    exportAbortRef.current = exportController
 
     try {
-      const processed = createProcessedBuffer(audioBuffer, { start, end, mode, fadeIn, fadeOut })
       let blob: Blob
-      if (format === 'wav') {
-        blob = encodeWav(processed)
+      if (mediaKind === 'video') {
+        setStatus('Loading the local video encoder…')
+        const processor = ffmpegRef.current ?? new LocalFfmpegProcessor()
+        ffmpegRef.current = processor
+        if (mode === 'remove' && selectionDuration >= duration - 0.05) throw new Error('Removing the entire video would create an empty file. Keep a small region or switch to Keep selection.')
+        blob = await processor.processVideo(file, { start, end, mode, fadeIn, fadeOut }, format as 'mp4' | 'webm', duration, (progress) => {
+          setStatus(`Encoding video locally… ${Math.round(progress * 100)}%`)
+        }, exportController.signal)
       } else if (codec) {
-        setStatus(`Encoding ${selectedFormat.label} locally…`)
-        blob = await encodeWithBrowserCodec(processed, codec)
+        const processed = createProcessedBuffer(audioBuffer!, { start, end, mode, fadeIn, fadeOut })
+        if (format === 'wav') blob = encodeWav(processed)
+        else blob = await encodeWithBrowserCodec(processed, codec)
+      } else if (format === 'wav') {
+        const processed = createProcessedBuffer(audioBuffer!, { start, end, mode, fadeIn, fadeOut })
+        blob = encodeWav(processed)
       } else {
         throw new Error(`${selectedFormat.label} is not available in this browser. Choose WAV, or add a self-hosted FFmpeg WASM bundle for more codecs.`)
       }
@@ -452,11 +588,22 @@ export default function App() {
       setExported(true)
       setStatus('Export complete. Your file stayed on this device.')
     } catch (exportError) {
+      if (exportController.signal.aborted) {
+        setError('')
+        setStatus('Export cancelled. Your source file is still here.')
+        return
+      }
       setError(exportError instanceof Error ? exportError.message : 'Export failed. Try WAV instead.')
       setStatus('Export needs your attention.')
     } finally {
+      exportAbortRef.current = null
       setIsBusy(false)
     }
+  }
+
+  const cancelExport = () => {
+    exportAbortRef.current?.abort()
+    ffmpegRef.current?.cancel()
   }
 
   const resetSelection = () => {
@@ -484,13 +631,13 @@ export default function App() {
       <main id="main-content" className="workspace">
         <section className="intro-row">
           <div>
-            <p className="eyebrow">OFFLINE AUDIO STUDIO <span className="eyebrow-dot" /></p>
+            <p className="eyebrow">OFFLINE MEDIA STUDIO <span className="eyebrow-dot" /></p>
             <h1>Make the cut.<br /><em>Keep it local.</em></h1>
           </div>
           <p className="intro-copy">Trim, preview, and export a clean clip without sending a single byte anywhere.</p>
         </section>
 
-        <section className="editor-card" aria-label="Audio editor">
+        <section className="editor-card" aria-label={mediaKind === 'video' ? 'Video editor' : 'Audio editor'}>
           {!file ? (
             <div
               className={`drop-zone ${isDraggingFile ? 'is-dragging' : ''}`}
@@ -500,20 +647,21 @@ export default function App() {
               onDrop={onDrop}
             >
               <div className="drop-icon"><Icon name="upload" size={28} /></div>
-              <h2>Drop an audio file here</h2>
-              <p>MP3, WAV, M4A, FLAC, OGG, or Opus · up to your device’s limits</p>
-              <button className="button button-dark" onClick={() => inputRef.current?.click()}><Icon name="upload" size={17} /> Choose audio</button>
+              <h2>Drop audio or video here</h2>
+              <p>MP3, WAV, MP4, WebM, M4A, FLAC, OGG, or Opus · processed locally</p>
+              <button className="button button-dark" onClick={() => inputRef.current?.click()}><Icon name="upload" size={17} /> Choose media</button>
               <span className="drop-note"><Icon name="shield" size={14} /> Processed locally in your browser</span>
             </div>
           ) : (
             <>
               <div className="file-strip">
-                <div className="file-detail"><span className="file-icon"><Icon name="wave" size={18} /></span><div><strong>{file.name}</strong><span>{makeFileLabel(file).split(' · ')[1]} · {formatTime(duration, true)} duration</span></div></div>
-                <button className="icon-button" onClick={() => { stopPlayback(); setFile(null); setAudioBuffer(null); setWaveform(null); setStatus('Ready when you are.'); setError('') }} aria-label="Remove file"><Icon name="x" size={18} /></button>
+                <div className="file-detail"><span className="file-icon"><Icon name={mediaKind === 'video' ? 'video' : 'wave'} size={18} /></span><div><strong>{file.name}</strong><span>{makeFileLabel(file).split(' · ')[1]} · {formatTime(duration, true)} duration</span></div></div>
+                <button className="icon-button" onClick={() => { stopPlayback(); if (mediaUrlRef.current) URL.revokeObjectURL(mediaUrlRef.current); mediaUrlRef.current = null; setMediaUrl(null); setMediaKind('audio'); setFile(null); setAudioBuffer(null); setWaveform(null); setFormat('wav'); setStatus('Ready when you are.'); setError('') }} aria-label="Remove file"><Icon name="x" size={18} /></button>
               </div>
 
-              <div className="waveform-header"><div><span className="section-kicker">WAVEFORM</span><span className="waveform-hint">Drag the handles or use the keyboard</span></div><div className="zoom-control"><span>Zoom</span><button onClick={() => setZoom((value) => clamp(value - 0.5, 1, 4))} aria-label="Zoom out" disabled={zoom <= 1}><Icon name="minus" size={15} /></button><span className="zoom-value">{zoom.toFixed(1)}×</span><button onClick={() => setZoom((value) => clamp(value + 0.5, 1, 4))} aria-label="Zoom in" disabled={zoom >= 4}><Icon name="plus" size={15} /></button></div></div>
-              <WaveformEditor data={waveform} start={start} end={end} playhead={playhead} zoom={zoom} mode={mode} onSelectionChange={setSelection} onPlayheadChange={setPlayhead} />
+              {mediaKind === 'video' && mediaUrl && <div className="video-preview"><video ref={videoRef} src={mediaUrl} playsInline preload="metadata" onTimeUpdate={handleVideoTimeUpdate} onEnded={handleVideoEnded} aria-label="Video preview" /><div className="video-preview-label"><Icon name="video" size={14} /> Video preview · selection-aware playback</div></div>}
+              <div className="waveform-header"><div><span className="section-kicker">{mediaKind === 'video' ? 'MEDIA TIMELINE' : 'WAVEFORM'}</span><span className="waveform-hint">{mediaKind === 'video' && !audioBuffer ? 'Use the handles or time fields to set the cut' : 'Drag the handles or use the keyboard'}</span></div><div className="zoom-control"><span>Zoom</span><button onClick={() => setZoom((value) => clamp(value - 0.5, 1, 4))} aria-label="Zoom out" disabled={zoom <= 1}><Icon name="minus" size={15} /></button><span className="zoom-value">{zoom.toFixed(1)}×</span><button onClick={() => setZoom((value) => clamp(value + 0.5, 1, 4))} aria-label="Zoom in" disabled={zoom >= 4}><Icon name="plus" size={15} /></button></div></div>
+              <WaveformEditor data={waveform} start={start} end={end} playhead={playhead} zoom={zoom} mode={mode} onSelectionChange={setSelection} onPlayheadChange={handlePlayheadChange} />
 
               <div className="selection-row">
                 <TimeControl label="Start" value={startInput} onChange={setStartInput} onCommit={() => commitTimeInput('start')} onNudge={(amount) => handleNudge('start', amount)} />
@@ -523,7 +671,7 @@ export default function App() {
 
               <div className="control-divider" />
               <div className="transport-row">
-                <button className="transport-main" onClick={() => void togglePlayback()} aria-label={isPlaying ? 'Pause preview' : 'Preview selected region'}><span className="transport-icon"><Icon name={isPlaying ? 'pause' : 'play'} size={16} /></span><span>{isPlaying ? 'Pause preview' : 'Preview selection'}</span></button>
+                <button className="transport-main" onClick={() => void togglePlayback()} aria-label={isPlaying ? 'Pause preview' : 'Preview selected region'}><span className="transport-icon"><Icon name={isPlaying ? 'pause' : 'play'} size={16} /></span><span>{isPlaying ? 'Pause preview' : mediaKind === 'video' ? 'Preview video' : 'Preview selection'}</span></button>
                 <div className="position-readout"><span>POSITION</span><strong>{formatTime(playhead, true)}</strong><span className="position-divider">/</span><span>{formatTime(duration, true)}</span></div>
                 <button className="text-button" onClick={resetSelection}><Icon name="undo" size={15} /> Reset selection</button>
               </div>
@@ -538,13 +686,13 @@ export default function App() {
 
           {(error || status) && <div className={`status-line ${error ? 'has-error' : ''} ${exported ? 'is-success' : ''}`} role={error ? 'alert' : 'status'} aria-live={error ? 'assertive' : 'polite'}><span className="status-pip" />{error || status}</div>}
 
-          {file && <div className="export-bar"><div className="export-copy"><span className="export-kicker"><Icon name="shield" size={14} /> LOCAL EXPORT</span><strong>{isCodecAvailable ? `Ready to create ${selectedFormat.label}` : 'Choose a browser-supported format'}</strong><span>Nothing is uploaded. The final file is assembled in memory.</span></div><button className="button button-export" onClick={() => void handleExport()} disabled={isBusy}><span>{isBusy ? 'Working…' : 'Trim Audio'}</span><Icon name={isBusy ? 'spark' : 'download'} size={18} /></button></div>}
+          {file && <div className="export-bar"><div className="export-copy"><span className="export-kicker"><Icon name="shield" size={14} /> LOCAL EXPORT</span><strong>{isCodecAvailable ? `Ready to create ${selectedFormat.label}` : 'Choose a browser-supported format'}</strong><span>Nothing is uploaded. The final file is assembled in memory.</span></div><div className="export-actions">{isBusy && mediaKind === 'video' && <button className="cancel-button" onClick={cancelExport}>Cancel</button>}<button className="button button-export" onClick={() => void handleExport()} disabled={isBusy}><span>{isBusy ? 'Working…' : mediaKind === 'video' ? 'Trim Video' : 'Trim Audio'}</span><Icon name={isBusy ? 'spark' : 'download'} size={18} /></button></div></div>}
         </section>
 
         <footer className="footer-note"><span><span className="footer-mark">✦</span> Built for quick edits, not complicated timelines.</span><span>Works offline after the first load <span className="online-dot" /></span></footer>
       </main>
 
-      <input ref={inputRef} className="sr-only" type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.flac,.ogg,.opus" onChange={(event) => { const picked = event.target.files?.[0]; if (picked) void loadFile(picked); event.target.value = '' }} />
+      <input ref={inputRef} className="sr-only" type="file" accept="audio/*,video/*,.mp3,.wav,.mp4,.webm,.mov,.m4v,.m4a,.aac,.flac,.ogg,.opus" onChange={(event) => { const picked = event.target.files?.[0]; if (picked) void loadFile(picked); event.target.value = '' }} />
     </div>
   )
 }

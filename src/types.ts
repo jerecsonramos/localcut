@@ -1,6 +1,6 @@
 export type EditMode = 'keep' | 'remove'
 
-export type OutputFormat = 'wav' | 'mp3' | 'm4a' | 'flac' | 'ogg'
+export type OutputFormat = 'wav' | 'mp3' | 'm4a' | 'flac' | 'ogg' | 'mp4' | 'webm'
 
 export type WaveformData = {
   peaks: Float32Array
