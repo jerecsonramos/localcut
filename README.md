@@ -22,6 +22,7 @@ The production build is generated with `npm run build` and includes a Workbox se
 - Playback uses an `AudioBufferSourceNode`, so previews use the exact same local processed buffer that WAV export uses.
 - `src/services/ffmpegProcessor.ts` owns local MP4/WebM video export through FFmpeg WASM. The Vite build copies the official single-thread core and worker assets into `/ffmpeg`; no CDN fallback exists.
 - `src/workers/ffmpeg.worker.ts` remains the extension seam for a custom worker pipeline if the app later needs streaming or multithreaded processing.
+- Video timelines can be clicked or dragged to scrub the local preview frame. Selection handles, keyboard nudges, and time fields keep the paused video frame in sync.
 
 ## Format behavior
 

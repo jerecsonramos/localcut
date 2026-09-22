@@ -90,6 +90,9 @@ function WaveformEditor({
   mode,
   onSelectionChange,
   onPlayheadChange,
+  onScrub,
+  onScrubStart,
+  onScrubEnd,
 }: {
   data: WaveformData | null
   start: number
@@ -99,6 +102,9 @@ function WaveformEditor({
   mode: EditMode
   onSelectionChange: (start: number, end: number) => void
   onPlayheadChange: (time: number) => void
+  onScrub?: (time: number) => void
+  onScrubStart?: () => void
+  onScrubEnd?: () => void
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const rootRef = useRef<HTMLDivElement>(null)
@@ -136,27 +142,48 @@ function WaveformEditor({
       const threshold = Math.max(16, width * 0.018)
       if (Math.abs(x - startX) <= threshold) {
         setDragging('start')
+        onScrubStart?.()
+        onScrub?.(start)
         event.currentTarget.setPointerCapture(event.pointerId)
         return
       }
       if (Math.abs(x - endX) <= threshold) {
         setDragging('end')
+        onScrubStart?.()
+        onScrub?.(end)
         event.currentTarget.setPointerCapture(event.pointerId)
         return
       }
+      onScrubStart?.()
       onPlayheadChange(time)
+      onScrubEnd?.()
       return
     }
 
-    if (dragging === 'start') onSelectionChange(clamp(time, 0, end - MIN_SELECTION), end)
-    if (dragging === 'end') onSelectionChange(start, clamp(time, start + MIN_SELECTION, duration))
-  }, [data, dragging, duration, end, onPlayheadChange, onSelectionChange, start, timeToX, xToTime])
+    if (dragging === 'start') {
+      const nextStart = clamp(time, 0, end - MIN_SELECTION)
+      onSelectionChange(nextStart, end)
+      onScrub?.(nextStart)
+    }
+    if (dragging === 'end') {
+      const nextEnd = clamp(time, start + MIN_SELECTION, duration)
+      onSelectionChange(start, nextEnd)
+      onScrub?.(nextEnd)
+    }
+  }, [data, dragging, duration, end, onPlayheadChange, onScrub, onScrubEnd, onScrubStart, onSelectionChange, start, timeToX, xToTime])
 
   useEffect(() => {
-    const release = () => setDragging(null)
+    const release = () => {
+      setDragging(null)
+      onScrubEnd?.()
+    }
     window.addEventListener('pointerup', release)
-    return () => window.removeEventListener('pointerup', release)
-  }, [])
+    window.addEventListener('pointercancel', release)
+    return () => {
+      window.removeEventListener('pointerup', release)
+      window.removeEventListener('pointercancel', release)
+    }
+  }, [onScrubEnd])
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -243,8 +270,17 @@ function WaveformEditor({
     if (event.key === 'ArrowRight' || event.key === '+') delta = step
     if (!delta) return
     event.preventDefault()
-    if (handle === 'start') onSelectionChange(clamp(start + delta, 0, end - MIN_SELECTION), end)
-    else onSelectionChange(start, clamp(end + delta, start + MIN_SELECTION, duration))
+    onScrubStart?.()
+    if (handle === 'start') {
+      const nextStart = clamp(start + delta, 0, end - MIN_SELECTION)
+      onSelectionChange(nextStart, end)
+      onScrub?.(nextStart)
+    } else {
+      const nextEnd = clamp(end + delta, start + MIN_SELECTION, duration)
+      onSelectionChange(start, nextEnd)
+      onScrub?.(nextEnd)
+    }
+    onScrubEnd?.()
   }
 
   return (
@@ -253,13 +289,13 @@ function WaveformEditor({
         ref={canvasRef}
         className="waveform-canvas"
         onPointerDown={handlePointer}
-        aria-label="Audio waveform. Drag the handles to set the selection."
+        aria-label="Media timeline. Click or drag to preview a frame. Drag the handles to set the selection."
       />
       {data && <>
         <button
           className={`wave-handle wave-handle-start ${dragging === 'start' ? 'is-dragging' : ''}`}
           style={handleStyle(start)}
-          onPointerDown={(event) => { event.stopPropagation(); setDragging('start'); event.currentTarget.setPointerCapture(event.pointerId) }}
+          onPointerDown={(event) => { event.stopPropagation(); setDragging('start'); onScrubStart?.(); onScrub?.(start); event.currentTarget.setPointerCapture(event.pointerId) }}
           onKeyDown={(event) => handleKeyDown(event, 'start')}
           aria-valuenow={start}
           aria-valuemin={0}
@@ -270,7 +306,7 @@ function WaveformEditor({
         <button
           className={`wave-handle wave-handle-end ${dragging === 'end' ? 'is-dragging' : ''}`}
           style={handleStyle(end)}
-          onPointerDown={(event) => { event.stopPropagation(); setDragging('end'); event.currentTarget.setPointerCapture(event.pointerId) }}
+          onPointerDown={(event) => { event.stopPropagation(); setDragging('end'); onScrubStart?.(); onScrub?.(end); event.currentTarget.setPointerCapture(event.pointerId) }}
           onKeyDown={(event) => handleKeyDown(event, 'end')}
           aria-valuenow={end}
           aria-valuemin={0}
@@ -316,6 +352,9 @@ export default function App() {
   const ffmpegRef = useRef<LocalFfmpegProcessor | null>(null)
   const sourceRef = useRef<AudioBufferSourceNode | null>(null)
   const frameRef = useRef<number | null>(null)
+  const scrubFrameRef = useRef<number | null>(null)
+  const pendingScrubTimeRef = useRef<number | null>(null)
+  const isScrubbingRef = useRef(false)
   const exportAbortRef = useRef<AbortController | null>(null)
   const playbackElapsedRef = useRef(0)
   const playbackStartedAtRef = useRef(0)
@@ -327,6 +366,12 @@ export default function App() {
   const selectedFormat = outputOptions.find((option) => option.value === format) ?? outputOptions[0]
   const codec = mediaKind === 'video' ? null : format === 'wav' ? 'audio/wav' : browserEncoderFor(format)
   const isCodecAvailable = mediaKind === 'video' || format === 'wav' || !!codec
+
+  const cancelScheduledScrub = useCallback(() => {
+    if (scrubFrameRef.current !== null) cancelAnimationFrame(scrubFrameRef.current)
+    scrubFrameRef.current = null
+    pendingScrubTimeRef.current = null
+  }, [])
 
   const stopPlayback = useCallback(() => {
     if (frameRef.current !== null) cancelAnimationFrame(frameRef.current)
@@ -342,10 +387,13 @@ export default function App() {
 
   useEffect(() => () => {
     stopPlayback()
-    void contextRef.current?.close()
+    cancelScheduledScrub()
+    const context = contextRef.current
+    contextRef.current = null
+    if (context && context.state !== 'closed') void context.close().catch(() => undefined)
     ffmpegRef.current?.cancel()
     if (mediaUrlRef.current) URL.revokeObjectURL(mediaUrlRef.current)
-  }, [stopPlayback])
+  }, [cancelScheduledScrub, stopPlayback])
 
   const setSelection = useCallback((nextStart: number, nextEnd: number) => {
     const safeStart = clamp(nextStart, 0, Math.max(0, duration - MIN_SELECTION))
@@ -367,6 +415,7 @@ export default function App() {
       return
     }
 
+    cancelScheduledScrub()
     stopPlayback()
     if (mediaUrlRef.current) URL.revokeObjectURL(mediaUrlRef.current)
     mediaUrlRef.current = null
@@ -422,7 +471,7 @@ export default function App() {
     } finally {
       setIsBusy(false)
     }
-  }, [stopPlayback])
+  }, [cancelScheduledScrub, stopPlayback])
 
   const commitTimeInput = (which: 'start' | 'end') => {
     const parsed = parseTime(which === 'start' ? startInput : endInput)
@@ -431,8 +480,15 @@ export default function App() {
       setEndInput(formatTime(end))
       return
     }
-    if (which === 'start') setSelection(parsed, end)
-    else setSelection(start, parsed)
+    if (which === 'start') {
+      const nextStart = clamp(parsed, 0, end - MIN_SELECTION)
+      setSelection(nextStart, end)
+      handlePlayheadChange(nextStart)
+    } else {
+      const nextEnd = clamp(parsed, start + MIN_SELECTION, duration)
+      setSelection(start, nextEnd)
+      handlePlayheadChange(nextEnd)
+    }
   }
 
   const animatePlayback = useCallback(() => {
@@ -482,6 +538,11 @@ export default function App() {
     if (!video) return
     const current = video.currentTime
 
+    if (video.paused || isScrubbingRef.current) {
+      setPlayhead(clamp(current, 0, duration))
+      return
+    }
+
     if (mode === 'keep' && current >= end - 0.03) {
       video.pause()
       video.currentTime = start
@@ -499,23 +560,54 @@ export default function App() {
   }
 
   const handleVideoEnded = () => {
+    isScrubbingRef.current = false
     setIsPlaying(false)
     setPlayhead(mode === 'keep' ? start : 0)
   }
 
-  const handlePlayheadChange = (time: number) => {
-    setPlayhead(time)
+  const handleScrubStart = useCallback(() => {
+    isScrubbingRef.current = true
+    if (videoRef.current) videoRef.current.pause()
+    setIsPlaying(false)
+  }, [])
+
+  const handleScrubEnd = useCallback(() => {
+    isScrubbingRef.current = false
+  }, [])
+
+  const handleScrub = useCallback((time: number) => {
+    const safeTime = clamp(time, 0, duration)
+    setPlayhead(safeTime)
+    if (mediaKind !== 'video' || !videoRef.current) return
+
+    pendingScrubTimeRef.current = safeTime
+    if (scrubFrameRef.current !== null) return
+    scrubFrameRef.current = requestAnimationFrame(() => {
+      scrubFrameRef.current = null
+      const nextTime = pendingScrubTimeRef.current
+      pendingScrubTimeRef.current = null
+      const video = videoRef.current
+      if (!video || nextTime === null) return
+      video.currentTime = nextTime
+    })
+  }, [duration, mediaKind])
+
+  const handlePlayheadChange = useCallback((time: number) => {
+    const safeTime = clamp(time, 0, duration)
+    cancelScheduledScrub()
+    setPlayhead(safeTime)
     if (videoRef.current) {
       videoRef.current.pause()
-      videoRef.current.currentTime = time
+      videoRef.current.currentTime = safeTime
       setIsPlaying(false)
     }
-  }
+  }, [cancelScheduledScrub, duration])
 
   const togglePlayback = async () => {
     if (mediaKind === 'video') {
       const video = videoRef.current
       if (!video) return
+      cancelScheduledScrub()
       if (isPlaying) {
         video.pause()
         setIsPlaying(false)
@@ -545,8 +637,15 @@ export default function App() {
   }
 
   const handleNudge = (which: 'start' | 'end', amount: number) => {
-    if (which === 'start') setSelection(start + amount, end)
-    else setSelection(start, end + amount)
+    if (which === 'start') {
+      const nextStart = clamp(start + amount, 0, end - MIN_SELECTION)
+      setSelection(nextStart, end)
+      handlePlayheadChange(nextStart)
+    } else {
+      const nextEnd = clamp(end + amount, start + MIN_SELECTION, duration)
+      setSelection(start, nextEnd)
+      handlePlayheadChange(nextEnd)
+    }
   }
 
   const handleExport = async () => {
@@ -610,6 +709,7 @@ export default function App() {
     if (!duration) return
     stopPlayback()
     setSelection(0, duration)
+    handlePlayheadChange(0)
     setStatus('Selection reset to the full track.')
   }
 
@@ -630,11 +730,16 @@ export default function App() {
 
       <main id="main-content" className="workspace">
         <section className="intro-row">
-          <div>
-            <p className="eyebrow">OFFLINE MEDIA STUDIO <span className="eyebrow-dot" /></p>
-            <h1>Make the cut.<br /><em>Keep it local.</em></h1>
+          <div className="intro-heading">
+            <p className="eyebrow"><span className="eyebrow-index">01</span> LOCALCUT / MEDIA EDITOR <span className="eyebrow-dot" /></p>
+            <h1>Trim.<br /><em>Keep it local.</em></h1>
           </div>
-          <p className="intro-copy">Trim, preview, and export a clean clip without sending a single byte anywhere.</p>
+          <div className="intro-side">
+            <p className="intro-copy">Quick, private edits for audio and video. Your file stays in this browser tab from open to export.</p>
+            <div className="workflow-rail" aria-label="Editing workflow">
+              <span><b>01</b> OPEN</span><i aria-hidden="true" /><span><b>02</b> CUT</span><i aria-hidden="true" /><span><b>03</b> EXPORT</span>
+            </div>
+          </div>
         </section>
 
         <section className="editor-card" aria-label={mediaKind === 'video' ? 'Video editor' : 'Audio editor'}>
@@ -646,35 +751,59 @@ export default function App() {
               onDragLeave={() => setIsDraggingFile(false)}
               onDrop={onDrop}
             >
-              <div className="drop-icon"><Icon name="upload" size={28} /></div>
-              <h2>Drop audio or video here</h2>
-              <p>MP3, WAV, MP4, WebM, M4A, FLAC, OGG, or Opus · processed locally</p>
-              <button className="button button-dark" onClick={() => inputRef.current?.click()}><Icon name="upload" size={17} /> Choose media</button>
-              <span className="drop-note"><Icon name="shield" size={14} /> Processed locally in your browser</span>
+              <div className="drop-main">
+                <div className="drop-icon"><Icon name="upload" size={28} /></div>
+                <div className="drop-copy">
+                  <p className="drop-kicker">START WITH A LOCAL FILE</p>
+                  <h2>Drop audio or video here</h2>
+                  <p>Preview, select a region, and export without an upload.</p>
+                  <div className="drop-actions">
+                    <button className="button button-dark" onClick={() => inputRef.current?.click()}><Icon name="upload" size={17} /> Choose media</button>
+                    <span className="drop-note"><Icon name="shield" size={14} /> No upload · no account</span>
+                  </div>
+                </div>
+              </div>
+              <div className="drop-meta" aria-label="Local processing details">
+                <div><span>INPUT</span><strong>Audio + video</strong></div>
+                <div><span>OUTPUT</span><strong>WAV · MP3 · MP4</strong></div>
+                <div><span>STORAGE</span><strong>This device only</strong></div>
+              </div>
             </div>
           ) : (
             <>
               <div className="file-strip">
-                <div className="file-detail"><span className="file-icon"><Icon name={mediaKind === 'video' ? 'video' : 'wave'} size={18} /></span><div><strong>{file.name}</strong><span>{makeFileLabel(file).split(' · ')[1]} · {formatTime(duration, true)} duration</span></div></div>
-                <button className="icon-button" onClick={() => { stopPlayback(); if (mediaUrlRef.current) URL.revokeObjectURL(mediaUrlRef.current); mediaUrlRef.current = null; setMediaUrl(null); setMediaKind('audio'); setFile(null); setAudioBuffer(null); setWaveform(null); setFormat('wav'); setStatus('Ready when you are.'); setError('') }} aria-label="Remove file"><Icon name="x" size={18} /></button>
+                <div className="file-detail"><span className="file-icon"><Icon name={mediaKind === 'video' ? 'video' : 'wave'} size={18} /></span><div><strong>{file.name}</strong><span className="file-meta-line"><b className="media-type-tag">{mediaKind}</b><span>{makeFileLabel(file).split(' · ')[1]} · {formatTime(duration, true)} duration</span></span></div></div>
+                <div className="file-actions">
+                  <button className="text-button file-replace-button" onClick={() => inputRef.current?.click()}><Icon name="upload" size={14} /><span>Change file</span></button>
+                  <button className="icon-button" onClick={() => { stopPlayback(); if (mediaUrlRef.current) URL.revokeObjectURL(mediaUrlRef.current); mediaUrlRef.current = null; setMediaUrl(null); setMediaKind('audio'); setFile(null); setAudioBuffer(null); setWaveform(null); setFormat('wav'); setStatus('Ready when you are.'); setError('') }} aria-label="Remove file" title="Remove file"><Icon name="x" size={18} /></button>
+                </div>
               </div>
 
               {mediaKind === 'video' && mediaUrl && <div className="video-preview"><video ref={videoRef} src={mediaUrl} playsInline preload="metadata" onTimeUpdate={handleVideoTimeUpdate} onEnded={handleVideoEnded} aria-label="Video preview" /><div className="video-preview-label"><Icon name="video" size={14} /> Video preview · selection-aware playback</div></div>}
-              <div className="waveform-header"><div><span className="section-kicker">{mediaKind === 'video' ? 'MEDIA TIMELINE' : 'WAVEFORM'}</span><span className="waveform-hint">{mediaKind === 'video' && !audioBuffer ? 'Use the handles or time fields to set the cut' : 'Drag the handles or use the keyboard'}</span></div><div className="zoom-control"><span>Zoom</span><button onClick={() => setZoom((value) => clamp(value - 0.5, 1, 4))} aria-label="Zoom out" disabled={zoom <= 1}><Icon name="minus" size={15} /></button><span className="zoom-value">{zoom.toFixed(1)}×</span><button onClick={() => setZoom((value) => clamp(value + 0.5, 1, 4))} aria-label="Zoom in" disabled={zoom >= 4}><Icon name="plus" size={15} /></button></div></div>
-              <WaveformEditor data={waveform} start={start} end={end} playhead={playhead} zoom={zoom} mode={mode} onSelectionChange={setSelection} onPlayheadChange={handlePlayheadChange} />
+              <section className="timeline-stage" aria-label="Media timeline">
+                <div className="waveform-header">
+                  <div className="timeline-heading"><div className="timeline-title-line"><span className="section-kicker">{mediaKind === 'video' ? 'MEDIA TIMELINE' : 'WAVEFORM'}</span><span className="timeline-live-badge">LIVE PREVIEW</span></div><strong>{mode === 'keep' ? 'Select the part to keep' : 'Select the part to remove'}</strong><span className="waveform-hint">{mediaKind === 'video' ? 'Drag the timeline to preview a frame' : 'Drag the handles or use the keyboard'}</span></div>
+                  <div className="zoom-control"><span>Zoom</span><button onClick={() => setZoom((value) => clamp(value - 0.5, 1, 4))} aria-label="Zoom out" disabled={zoom <= 1}><Icon name="minus" size={15} /></button><span className="zoom-value">{zoom.toFixed(1)}×</span><button onClick={() => setZoom((value) => clamp(value + 0.5, 1, 4))} aria-label="Zoom in" disabled={zoom >= 4}><Icon name="plus" size={15} /></button></div>
+                </div>
+                <WaveformEditor data={waveform} start={start} end={end} playhead={playhead} zoom={zoom} mode={mode} onSelectionChange={setSelection} onPlayheadChange={handlePlayheadChange} onScrub={handleScrub} onScrubStart={handleScrubStart} onScrubEnd={handleScrubEnd} />
+                <div className="timeline-footer"><span><span className={`timeline-status-dot ${mode}`} />{mode === 'keep' ? 'Keeping selected region' : 'Removing selected region'}</span><span>{formatTime(selectionDuration, true)} selected</span></div>
+              </section>
 
-              <div className="selection-row">
-                <TimeControl label="Start" value={startInput} onChange={setStartInput} onCommit={() => commitTimeInput('start')} onNudge={(amount) => handleNudge('start', amount)} />
-                <div className="selection-summary"><span className={`mode-dot ${mode}`} /><span>{mode === 'keep' ? 'Keeping' : 'Removing'} {formatTime(selectionDuration)}</span></div>
-                <TimeControl label="End" value={endInput} onChange={setEndInput} onCommit={() => commitTimeInput('end')} onNudge={(amount) => handleNudge('end', amount)} />
-              </div>
+              <section className="selection-panel" aria-label="Selection controls">
+                <div className="selection-heading"><div><span className="section-kicker">SELECTION RANGE</span><p>Set exact in and out points, then preview the result.</p></div><div className="selection-length"><span>EDIT LENGTH</span><strong>{formatTime(selectionDuration, true)}</strong></div></div>
+                <div className="selection-row">
+                  <TimeControl label="Start" value={startInput} onChange={setStartInput} onCommit={() => commitTimeInput('start')} onNudge={(amount) => handleNudge('start', amount)} />
+                  <div className="selection-summary"><span className={`mode-dot ${mode}`} /><span>{mode === 'keep' ? 'Keeping' : 'Removing'} {formatTime(selectionDuration)}</span></div>
+                  <TimeControl label="End" value={endInput} onChange={setEndInput} onCommit={() => commitTimeInput('end')} onNudge={(amount) => handleNudge('end', amount)} />
+                </div>
 
-              <div className="control-divider" />
-              <div className="transport-row">
-                <button className="transport-main" onClick={() => void togglePlayback()} aria-label={isPlaying ? 'Pause preview' : 'Preview selected region'}><span className="transport-icon"><Icon name={isPlaying ? 'pause' : 'play'} size={16} /></span><span>{isPlaying ? 'Pause preview' : mediaKind === 'video' ? 'Preview video' : 'Preview selection'}</span></button>
-                <div className="position-readout"><span>POSITION</span><strong>{formatTime(playhead, true)}</strong><span className="position-divider">/</span><span>{formatTime(duration, true)}</span></div>
-                <button className="text-button" onClick={resetSelection}><Icon name="undo" size={15} /> Reset selection</button>
-              </div>
+                <div className="control-divider" />
+                <div className="transport-row">
+                  <button className="transport-main" onClick={() => void togglePlayback()} aria-label={isPlaying ? 'Pause preview' : 'Preview selected region'}><span className="transport-icon"><Icon name={isPlaying ? 'pause' : 'play'} size={16} /></span><span>{isPlaying ? 'Pause preview' : mediaKind === 'video' ? 'Preview video' : 'Preview selection'}</span></button>
+                  <div className="position-readout"><span>POSITION</span><strong>{formatTime(playhead, true)}</strong><span className="position-divider">/</span><span>{formatTime(duration, true)}</span></div>
+                  <button className="text-button" onClick={resetSelection}><Icon name="undo" size={15} /> Reset selection</button>
+                </div>
+              </section>
             </>
           )}
 
@@ -689,7 +818,7 @@ export default function App() {
           {file && <div className="export-bar"><div className="export-copy"><span className="export-kicker"><Icon name="shield" size={14} /> LOCAL EXPORT</span><strong>{isCodecAvailable ? `Ready to create ${selectedFormat.label}` : 'Choose a browser-supported format'}</strong><span>Nothing is uploaded. The final file is assembled in memory.</span></div><div className="export-actions">{isBusy && mediaKind === 'video' && <button className="cancel-button" onClick={cancelExport}>Cancel</button>}<button className="button button-export" onClick={() => void handleExport()} disabled={isBusy}><span>{isBusy ? 'Working…' : mediaKind === 'video' ? 'Trim Video' : 'Trim Audio'}</span><Icon name={isBusy ? 'spark' : 'download'} size={18} /></button></div></div>}
         </section>
 
-        <footer className="footer-note"><span><span className="footer-mark">✦</span> Built for quick edits, not complicated timelines.</span><span>Works offline after the first load <span className="online-dot" /></span></footer>
+        <footer className="footer-note"><span><span className="footer-mark" aria-hidden="true" /> Built for quick edits, not complicated timelines.</span><span>Works offline after the first load <span className="online-dot" /></span></footer>
       </main>
 
       <input ref={inputRef} className="sr-only" type="file" accept="audio/*,video/*,.mp3,.wav,.mp4,.webm,.mov,.m4v,.m4a,.aac,.flac,.ogg,.opus" onChange={(event) => { const picked = event.target.files?.[0]; if (picked) void loadFile(picked); event.target.value = '' }} />
