@@ -33,9 +33,10 @@ button, a, input, select { -webkit-tap-highlight-color: transparent; }
 
 .app-shell { min-height: 100vh; overflow: hidden; }
 .topbar { height: 72px; padding: env(safe-area-inset-top) max(clamp(20px, 5vw, 80px), env(safe-area-inset-left)) 0 max(clamp(20px, 5vw, 80px), env(safe-area-inset-right)); display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); }
-.brand { display: inline-flex; align-items: center; gap: 10px; color: var(--ink); font-family: var(--display); font-size: 21px; font-weight: 700; letter-spacing: -.08em; text-decoration: none; }
+.brand { display: inline-flex; align-items: center; gap: 10px; color: var(--ink); font-family: var(--display); font-size: 21px; font-weight: 700; letter-spacing: -.06em; text-decoration: none; }
 .brand > span:last-child span { color: #7d8c52; }
-.brand-mark { width: 32px; height: 32px; display: grid; place-items: center; color: var(--acid); background: var(--ink); border-radius: 9px; }
+.brand-mark { width: 32px; height: 32px; display: grid; place-items: center; }
+.brand-mark img { width: 100%; height: 100%; display: block; }
 .privacy-chip { display: inline-flex; align-items: center; gap: 8px; color: #53625a; font-family: var(--mono); font-size: 10px; letter-spacing: .03em; text-transform: uppercase; }
 .privacy-chip svg { color: #6e9140; }
 .workspace { width: min(1160px, calc(100% - 48px)); margin: 0 auto; padding: 48px 0 36px; }

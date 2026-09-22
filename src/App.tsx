@@ -52,6 +52,10 @@ function Icon({ name, size = 18 }: { name: IconName; size?: number }) {
   return <svg {...common}>{paths[name]}</svg>
 }
 
+function LocalCutMark({ size = 20 }: { size?: number }) {
+  return <img src="/icon.svg" width={size} height={size} alt="" aria-hidden="true" draggable={false} />
+}
+
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value))
 }
@@ -725,7 +729,7 @@ export default function App() {
     <div className="app-shell">
       <a className="skip-link" href="#main-content">Skip to editor</a>
       <header className="topbar">
-        <a className="brand" href="/" aria-label="LocalCut home"><span className="brand-mark"><Icon name="wave" size={19} /></span><span>local<span>cut</span></span></a>
+        <a className="brand" href="/" aria-label="LocalCut home"><span className="brand-mark"><LocalCutMark size={22} /></span><span>Local<span>Cut</span></span></a>
         <div className="privacy-chip"><Icon name="shield" size={16} /><span>Your audio never leaves this device</span></div>
       </header>
 
