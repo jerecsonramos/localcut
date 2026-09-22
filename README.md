@@ -15,6 +15,26 @@ On Windows, you can double-click `Run LocalCut.cmd`. It runs `run-localcut.ps1`,
 
 The production build is generated with `npm run build` and includes a Workbox service worker plus a web app manifest. The app has no API calls, analytics, uploads, or remote font dependencies.
 
+## Build the Windows installer
+
+The desktop installer is built with Electron and packages the production app, including the local FFmpeg assets. Run:
+
+```bash
+npm run desktop:build
+```
+
+The NSIS installer is written to `release/LocalCut Setup 0.1.0.exe`. It creates a Start Menu entry and a desktop shortcut, and lets the user choose the installation directory. `npm run desktop:dev` builds the app and opens the packaged desktop shell for a quick local check.
+
+The default build is unsigned for local development. For a release build, `desktop:build:signed` requires either a PFX Authenticode certificate or Azure Artifact Signing credentials; it refuses to produce an unsigned installer.
+
+For a PFX certificate, set `WIN_CSC_LINK` and `WIN_CSC_KEY_PASSWORD`. For Azure Artifact Signing (formerly Trusted Signing), set `LOCALCUT_SIGNING_PROVIDER=azure`, `LOCALCUT_AZURE_PUBLISHER_NAME`, `LOCALCUT_AZURE_ENDPOINT`, `LOCALCUT_AZURE_ACCOUNT_NAME`, `LOCALCUT_AZURE_CERTIFICATE_PROFILE_NAME`, and the Azure authentication variables required by the signing service. Then run:
+
+```powershell
+npm run desktop:build:signed
+```
+
+Keep certificate passwords and Azure secrets outside the repository. The Azure configuration follows electron-builder's v26 signing integration and Microsoft's Artifact Signing setup.
+
 ## Processing architecture
 
 - `src/services/audioProcessor.ts` owns decoding, waveform peak generation, selection rendering, fades, WAV encoding, and browser MediaRecorder codec detection.

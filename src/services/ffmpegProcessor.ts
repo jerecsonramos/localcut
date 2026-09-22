@@ -5,7 +5,7 @@ import type { AudioJob } from '../types'
 export type FfmpegProgress = (progress: number) => void
 
 export class LocalFfmpegProcessor {
-  readonly assetPath = import.meta.env.VITE_FFMPEG_ASSET_PATH || '/ffmpeg'
+  readonly assetPath = import.meta.env.VITE_FFMPEG_ASSET_PATH || './ffmpeg'
   private instance: FFmpeg | null = null
   private loadPromise: Promise<FFmpeg> | null = null
 

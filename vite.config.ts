@@ -38,6 +38,7 @@ function localFfmpegAssets() {
 }
 
 export default defineConfig({
+  base: './',
   plugins: [
     react(),
     localFfmpegAssets(),
