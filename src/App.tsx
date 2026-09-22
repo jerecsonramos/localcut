@@ -366,6 +366,7 @@ export default function App() {
   const selectedFormat = outputOptions.find((option) => option.value === format) ?? outputOptions[0]
   const codec = mediaKind === 'video' ? null : format === 'wav' ? 'audio/wav' : browserEncoderFor(format)
   const isCodecAvailable = mediaKind === 'video' || format === 'wav' || !!codec
+  const showStatus = Boolean(error || isBusy || status.startsWith('Export cancelled'))
 
   const cancelScheduledScrub = useCallback(() => {
     if (scrubFrameRef.current !== null) cancelAnimationFrame(scrubFrameRef.current)
@@ -772,36 +773,42 @@ export default function App() {
           ) : (
             <>
               <div className="file-strip">
-                <div className="file-detail"><span className="file-icon"><Icon name={mediaKind === 'video' ? 'video' : 'wave'} size={18} /></span><div><strong>{file.name}</strong><span className="file-meta-line"><b className="media-type-tag">{mediaKind}</b><span>{makeFileLabel(file).split(' · ')[1]} · {formatTime(duration, true)} duration</span></span></div></div>
+                <div className="file-detail"><span className="file-icon"><Icon name={mediaKind === 'video' ? 'video' : 'wave'} size={18} /></span><div><strong>{file.name}</strong><span className="file-meta-line">{mediaKind === 'video' ? 'Video' : 'Audio'} · {makeFileLabel(file).split(' · ')[1]} · {formatTime(duration, true)}</span></div></div>
                 <div className="file-actions">
                   <button className="text-button file-replace-button" onClick={() => inputRef.current?.click()}><Icon name="upload" size={14} /><span>Change file</span></button>
                   <button className="icon-button" onClick={() => { stopPlayback(); if (mediaUrlRef.current) URL.revokeObjectURL(mediaUrlRef.current); mediaUrlRef.current = null; setMediaUrl(null); setMediaKind('audio'); setFile(null); setAudioBuffer(null); setWaveform(null); setFormat('wav'); setStatus('Ready when you are.'); setError('') }} aria-label="Remove file" title="Remove file"><Icon name="x" size={18} /></button>
                 </div>
               </div>
 
-              {mediaKind === 'video' && mediaUrl && <div className="video-preview"><video ref={videoRef} src={mediaUrl} playsInline preload="metadata" onTimeUpdate={handleVideoTimeUpdate} onEnded={handleVideoEnded} aria-label="Video preview" /><div className="video-preview-label"><Icon name="video" size={14} /> Video preview · selection-aware playback</div></div>}
-              <section className="timeline-stage" aria-label="Media timeline">
-                <div className="waveform-header">
-                  <div className="timeline-heading"><div className="timeline-title-line"><span className="section-kicker">{mediaKind === 'video' ? 'MEDIA TIMELINE' : 'WAVEFORM'}</span><span className="timeline-live-badge">LIVE PREVIEW</span></div><strong>{mode === 'keep' ? 'Select the part to keep' : 'Select the part to remove'}</strong><span className="waveform-hint">{mediaKind === 'video' ? 'Drag the timeline to preview a frame' : 'Drag the handles or use the keyboard'}</span></div>
-                  <div className="zoom-control"><span>Zoom</span><button onClick={() => setZoom((value) => clamp(value - 0.5, 1, 4))} aria-label="Zoom out" disabled={zoom <= 1}><Icon name="minus" size={15} /></button><span className="zoom-value">{zoom.toFixed(1)}×</span><button onClick={() => setZoom((value) => clamp(value + 0.5, 1, 4))} aria-label="Zoom in" disabled={zoom >= 4}><Icon name="plus" size={15} /></button></div>
+              <div className={mediaKind === 'video' ? 'video-workbench' : 'audio-workbench'}>
+                {mediaKind === 'video' && mediaUrl && <div className="video-preview"><video ref={videoRef} src={mediaUrl} playsInline preload="metadata" onTimeUpdate={handleVideoTimeUpdate} onEnded={handleVideoEnded} aria-label="Video preview" /><div className="video-preview-meta" aria-hidden="true"><span className="video-preview-label"><Icon name="video" size={14} /> Frame preview</span><span className="video-preview-time">{formatTime(playhead, true)} / {formatTime(duration, true)}</span></div></div>}
+                <section className="timeline-stage" aria-label="Media timeline">
+                  <div className="waveform-header">
+                    <div className="timeline-heading"><div className="timeline-title-line"><span className="section-kicker">{mediaKind === 'video' ? 'MEDIA TIMELINE' : 'WAVEFORM'}</span><span className="timeline-live-badge">LIVE PREVIEW</span></div><strong>{mode === 'keep' ? 'Select the part to keep' : 'Select the part to remove'}</strong><span className="waveform-hint">{mediaKind === 'video' ? 'Drag the timeline to preview a frame' : 'Drag the handles or use the keyboard'}</span></div>
+                    <div className="zoom-control"><span>Zoom</span><button onClick={() => setZoom((value) => clamp(value - 0.5, 1, 4))} aria-label="Zoom out" disabled={zoom <= 1}><Icon name="minus" size={15} /></button><span className="zoom-value">{zoom.toFixed(1)}×</span><button onClick={() => setZoom((value) => clamp(value + 0.5, 1, 4))} aria-label="Zoom in" disabled={zoom >= 4}><Icon name="plus" size={15} /></button></div>
+                  </div>
+                  <WaveformEditor data={waveform} start={start} end={end} playhead={playhead} zoom={zoom} mode={mode} onSelectionChange={setSelection} onPlayheadChange={handlePlayheadChange} onScrub={handleScrub} onScrubStart={handleScrubStart} onScrubEnd={handleScrubEnd} />
+                </section>
+              </div>
+
+              <div className="transport-row waveform-transport">
+                <button className="transport-main" onClick={() => void togglePlayback()} aria-label={isPlaying ? 'Pause preview' : 'Preview selected region'}><span className="transport-icon"><Icon name={isPlaying ? 'pause' : 'play'} size={16} /></span><span>{isPlaying ? 'Pause preview' : 'Preview selection'}</span></button>
+                <div className="position-readout" role="status" aria-live="polite" aria-label={`Current position ${formatTime(playhead, true)} of ${formatTime(duration, true)}`}>
+                  <span className="position-marker" aria-hidden="true" />
+                  <span className="position-label">POSITION</span>
+                  <strong>{formatTime(playhead, true)}</strong>
+                  <span className="position-divider" aria-hidden="true">/</span>
+                  <span className="position-total">{formatTime(duration, true)}</span>
                 </div>
-                <WaveformEditor data={waveform} start={start} end={end} playhead={playhead} zoom={zoom} mode={mode} onSelectionChange={setSelection} onPlayheadChange={handlePlayheadChange} onScrub={handleScrub} onScrubStart={handleScrubStart} onScrubEnd={handleScrubEnd} />
-                <div className="timeline-footer"><span><span className={`timeline-status-dot ${mode}`} />{mode === 'keep' ? 'Keeping selected region' : 'Removing selected region'}</span><span>{formatTime(selectionDuration, true)} selected</span></div>
-              </section>
+                <button className="text-button" onClick={resetSelection}><Icon name="undo" size={15} /> Reset selection</button>
+              </div>
 
               <section className="selection-panel" aria-label="Selection controls">
-                <div className="selection-heading"><div><span className="section-kicker">SELECTION RANGE</span><p>Set exact in and out points, then preview the result.</p></div><div className="selection-length"><span>EDIT LENGTH</span><strong>{formatTime(selectionDuration, true)}</strong></div></div>
+                <div className="selection-heading"><div><span className="section-kicker">SELECTION RANGE</span><p>{mode === 'keep' ? 'Choose the range that will be kept in the final file.' : 'Choose the range that will be removed from the final file.'}</p></div></div>
                 <div className="selection-row">
                   <TimeControl label="Start" value={startInput} onChange={setStartInput} onCommit={() => commitTimeInput('start')} onNudge={(amount) => handleNudge('start', amount)} />
-                  <div className="selection-summary"><span className={`mode-dot ${mode}`} /><span>{mode === 'keep' ? 'Keeping' : 'Removing'} {formatTime(selectionDuration)}</span></div>
+                  <div className="selection-duration" aria-live="polite"><span>DURATION</span><strong>{formatTime(selectionDuration, true)}</strong></div>
                   <TimeControl label="End" value={endInput} onChange={setEndInput} onCommit={() => commitTimeInput('end')} onNudge={(amount) => handleNudge('end', amount)} />
-                </div>
-
-                <div className="control-divider" />
-                <div className="transport-row">
-                  <button className="transport-main" onClick={() => void togglePlayback()} aria-label={isPlaying ? 'Pause preview' : 'Preview selected region'}><span className="transport-icon"><Icon name={isPlaying ? 'pause' : 'play'} size={16} /></span><span>{isPlaying ? 'Pause preview' : mediaKind === 'video' ? 'Preview video' : 'Preview selection'}</span></button>
-                  <div className="position-readout"><span>POSITION</span><strong>{formatTime(playhead, true)}</strong><span className="position-divider">/</span><span>{formatTime(duration, true)}</span></div>
-                  <button className="text-button" onClick={resetSelection}><Icon name="undo" size={15} /> Reset selection</button>
                 </div>
               </section>
             </>
@@ -810,12 +817,12 @@ export default function App() {
           {file && <div className="settings-grid">
             <div className="setting-block mode-block"><div className="setting-label"><span>EDIT MODE</span><span className="info-dot" title="Keep preserves the selection. Remove cuts it out.">i</span></div><div className="segmented-control"><button className={mode === 'keep' ? 'is-active' : ''} onClick={() => { setMode('keep'); stopPlayback() }}><span className="segment-indicator keep" />Keep selection</button><button className={mode === 'remove' ? 'is-active remove-active' : ''} onClick={() => { setMode('remove'); stopPlayback() }}><span className="segment-indicator remove" />Remove selection</button></div></div>
             <div className="setting-block"><div className="setting-label"><span>FINISHING</span><span className="setting-subtle">optional</span></div><div className="switch-row"><Switch label="Fade in" checked={fadeIn} onChange={setFadeIn} /><Switch label="Fade out" checked={fadeOut} onChange={setFadeOut} /></div></div>
-            <div className="setting-block format-block"><div className="setting-label"><span>OUTPUT FORMAT</span>{format !== 'wav' && !isCodecAvailable && <span className="setting-warning">browser codec unavailable</span>}</div><label className="format-select"><select aria-label="Output format" value={format} onChange={(event) => setFormat(event.target.value as OutputFormat)}>{outputOptions.map((option) => <option key={option.value} value={option.value}>{option.label} — {option.detail}</option>)}</select><Icon name="chevron" size={16} /></label></div>
+            <div className="setting-block format-block"><div className="setting-label"><span>OUTPUT FORMAT</span>{format !== 'wav' && !isCodecAvailable && <span className="setting-warning">browser codec unavailable</span>}</div><label className="format-select"><select aria-label="Output format" value={format} onChange={(event) => setFormat(event.target.value as OutputFormat)}>{outputOptions.map((option) => <option key={option.value} value={option.value}>{option.label} — {option.detail}</option>)}</select><Icon name="chevron" size={16} /></label><span className="format-detail">{selectedFormat.detail}</span></div>
           </div>}
 
-          {(error || status) && <div className={`status-line ${error ? 'has-error' : ''} ${exported ? 'is-success' : ''}`} role={error ? 'alert' : 'status'} aria-live={error ? 'assertive' : 'polite'}><span className="status-pip" />{error || status}</div>}
+          {showStatus && <div className={`status-line ${error ? 'has-error' : ''}`} role={error ? 'alert' : 'status'} aria-live={error ? 'assertive' : 'polite'}><span className="status-label">STATUS</span><span className="status-pip" />{error || status}</div>}
 
-          {file && <div className="export-bar"><div className="export-copy"><span className="export-kicker"><Icon name="shield" size={14} /> LOCAL EXPORT</span><strong>{isCodecAvailable ? `Ready to create ${selectedFormat.label}` : 'Choose a browser-supported format'}</strong><span>Nothing is uploaded. The final file is assembled in memory.</span></div><div className="export-actions">{isBusy && mediaKind === 'video' && <button className="cancel-button" onClick={cancelExport}>Cancel</button>}<button className="button button-export" onClick={() => void handleExport()} disabled={isBusy}><span>{isBusy ? 'Working…' : mediaKind === 'video' ? 'Trim Video' : 'Trim Audio'}</span><Icon name={isBusy ? 'spark' : 'download'} size={18} /></button></div></div>}
+          {file && <div className="export-bar"><div className="export-copy"><span className="export-kicker"><Icon name="shield" size={14} /> {exported ? 'EXPORT COMPLETE' : 'LOCAL EXPORT'} <b className="export-ready">{exported ? 'DONE' : 'READY'}</b></span><strong>{exported ? 'Your processed file is ready.' : isCodecAvailable ? `Ready to create ${selectedFormat.label}` : 'Choose a browser-supported format'}</strong><span>{exported ? 'Processed locally · Your source file stayed on this device.' : 'Processed locally · Nothing is uploaded.'}</span></div><div className="export-actions">{isBusy && mediaKind === 'video' && <button className="cancel-button" onClick={cancelExport}>Cancel</button>}<button className="button button-export" onClick={() => void handleExport()} disabled={isBusy}><span>{isBusy ? 'Working…' : mediaKind === 'video' ? 'Trim Video' : 'Trim Audio'}</span><Icon name={isBusy ? 'spark' : 'download'} size={18} /></button></div></div>}
         </section>
 
         <footer className="footer-note"><span><span className="footer-mark" aria-hidden="true" /> Built for quick edits, not complicated timelines.</span><span>Works offline after the first load <span className="online-dot" /></span></footer>
@@ -827,7 +834,7 @@ export default function App() {
 }
 
 function TimeControl({ label, value, onChange, onCommit, onNudge }: { label: string; value: string; onChange: (value: string) => void; onCommit: () => void; onNudge: (amount: number) => void }) {
-  return <div className="time-control"><label htmlFor={`time-${label.toLowerCase()}`}>{label}</label><div className="time-input-wrap"><input id={`time-${label.toLowerCase()}`} name={`time-${label.toLowerCase()}`} type="text" inputMode="decimal" autoComplete="off" spellCheck={false} value={value} onChange={(event) => onChange(event.target.value)} onBlur={onCommit} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); onCommit() } }} /><span>sec</span></div><div className="nudge-controls"><button onClick={() => onNudge(-0.1)} aria-label={`Move ${label} earlier`}><Icon name="minus" size={13} /></button><button onClick={() => onNudge(0.1)} aria-label={`Move ${label} later`}><Icon name="plus" size={13} /></button></div></div>
+  return <div className="time-control"><label htmlFor={`time-${label.toLowerCase()}`}>{label}</label><div className="time-control-group"><div className="time-input-wrap"><input id={`time-${label.toLowerCase()}`} name={`time-${label.toLowerCase()}`} type="text" inputMode="decimal" autoComplete="off" spellCheck={false} value={value} onChange={(event) => onChange(event.target.value)} onBlur={onCommit} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); onCommit() } }} /><span>sec</span></div><div className="nudge-controls"><button onClick={() => onNudge(-0.1)} aria-label={`Decrease ${label.toLowerCase()}`}><Icon name="minus" size={13} /></button><button onClick={() => onNudge(0.1)} aria-label={`Increase ${label.toLowerCase()}`}><Icon name="plus" size={13} /></button></div></div></div>
 }
 
 function Switch({ label, checked, onChange }: { label: string; checked: boolean; onChange: (value: boolean) => void }) {
